@@ -1,0 +1,10 @@
+# Everything except PyTorch. PyTorch must be AMD's ROCm build and is installed
+# first by setup.bat (see README) - do not add torch here.
+demucs>=4.1.0
+beat-this>=1.1.0
+numpy>=2.0
+scipy>=1.13
+soundfile>=0.13
+soxr>=0.5
+sounddevice>=0.5
+PySide6>=6.8
