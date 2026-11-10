@@ -98,8 +98,8 @@ def probe_gpu(run_smoke_test: bool = True) -> tuple[DeviceInfo | None, str | Non
     if not available:
         build = torch.__version__
         if "+cpu" in build:
-            reason = (f"This PyTorch build ({build}) is CPU-only. Install AMD's ROCm build "
-                      "of PyTorch (see README, step 3).")
+            reason = (f"This PyTorch build ({build}) is CPU-only. Run setup.bat to install "
+                      "AMD's GPU build of PyTorch (see README, Setup).")
         elif getattr(torch.version, "hip", None):
             reason = (f"PyTorch {build} has ROCm support but found no usable GPU. Update the "
                       "AMD Adrenalin driver and check `hipInfo.exe`.")

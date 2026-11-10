@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -104,6 +105,9 @@ class MainWindow(QMainWindow):
         self._pending_serial = 0
         self._engine_error: str | None = None
         self._was_playing = False
+        self._last_blocks = -1
+        self._last_block_time = time.monotonic()
+        self._stall_reported = False
 
         self.engine = engine or EngineClient(
             device=self.settings.get("output_device"),
@@ -419,7 +423,8 @@ class MainWindow(QMainWindow):
         self._finish_progress()
         self.track = track
         self.engine.pause(DECK)
-        self._pending_serial = self.engine.load(DECK, track.stem_array()) if self.engine.is_alive() else 0
+        stems = [track.stems[name] for name in STEMS]
+        self._pending_serial = self.engine.load(DECK, stems) if self.engine.is_alive() else 0
         for strip in self.strips:      # re-send the mixer state for the new song
             self.engine.set_fader(DECK, strip.index, strip.gain)
             self.engine.set_mute(DECK, strip.index, strip.mute.isChecked())
@@ -636,6 +641,16 @@ class MainWindow(QMainWindow):
                 strip.meter.set_level(peak if playing else 0.0)
         if status.running and status.underflows:
             self.audio_label.setToolTip(f"Audio dropouts so far: {status.underflows}")
+        # The sound card stopped asking for audio (unplugged, driver reset ...).
+        now = time.monotonic()
+        if status.blocks != self._last_blocks:
+            self._last_blocks = status.blocks
+            self._last_block_time = now
+        elif (status.running and deck.playing and now - self._last_block_time > 1.5
+              and not self._stall_reported):
+            self._stall_reported = True
+            self._show_banner("The audio device stopped responding (unplugged or changed?). "
+                              "Restart StemDeck to resume playback.")
 
     def closeEvent(self, event) -> None:
         self._timer.stop()

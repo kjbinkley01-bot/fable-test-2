@@ -47,7 +47,7 @@ git checkout claude/eager-cray-9rj8qi
 
 **4. Run setup.** This creates a private Python environment in the `.venv` folder (nothing is
 installed system-wide), installs AMD's GPU build of PyTorch (a download of several GB),
-installs the other packages, downloads the AI models (about 700 MB) and puts a StemDeck
+installs the other packages, downloads the AI models (about 500 MB) and puts a StemDeck
 shortcut on your Desktop.
 
 ```bat
@@ -214,8 +214,15 @@ tempo change) the grid follows the detected beats and the BPM shown is the typic
 
 StemDeck measures how much energy sits on each note across six octaves, correcting for
 tracks that are not tuned to standard pitch, and a small neural network trained on dance
-music with human-checked key labels scores all 24 keys. When stems are available the drums
-are left out first, since drums carry no key information.
+music with human-checked key labels scores all 24 keys. A classic music-theory key profile
+is blended in at a small weight: the network learned from dance music and is the more
+accurate of the two there, while the profile knows textbook harmony, which dance music rarely
+uses. Together they scored the same on dance music and fixed plain chord progressions the
+network alone got wrong.
+
+In the plan I said key detection would run on the song with the drums removed. I measured
+that on 40 held-out tracks and it made no difference (77.5% correct either way), so the
+detector listens to the full mix, which is also what it was trained on.
 
 ### Playback
 
@@ -257,7 +264,55 @@ I built this on a Linux machine with **no AMD GPU, no sound card and no Windows*
 - Drag and drop from Explorer, the Desktop shortcut and the `.bat` files themselves.
 - Stem quality by ear on your own music.
 
-ACCURACY_PLACEHOLDER
+### Measured results
+
+**Key.** Scored on 566 dance tracks the model never saw in training (the public GiantSteps+
+set; labels originate from Beatport and were corrected by musicians):
+
+| | Exact key | Weighted score* |
+|---|---|---|
+| StemDeck | **72%** | **79** |
+| Classic template matching on the same features | 61% | 70 |
+
+\* The standard research score, which gives part credit for near misses.
+
+Of the misses, roughly a quarter each are the relative key (same notes, e.g. A minor vs
+C major), the parallel key (A minor vs A major) and a neighbour on the Camelot wheel; the
+remaining quarter are unrelated keys. The confidence shown in the app is meaningful: when it is above 80% the key was right
+89% of the time; below 40%, only 43%.
+
+Two cautions. This test set is deliberately hard, and it is all electronic dance music. For
+other genres I have no labelled data, so accuracy there is unmeasured; a music-theory
+safeguard is blended in (see *How it works*) but treat pop, rock or hip-hop results with more
+suspicion and use `check_analysis.bat` to find out. "At least 4 of 5" is realistic, not
+guaranteed.
+
+**BPM.** Scored on 661 annotated dance tracks (GiantSteps tempo set):
+
+| | |
+|---|---|
+| Within 4% of the annotated BPM | **89%** |
+| Right tempo, possibly counted at half or double time | **97%** |
+| Same, on the 85% of tracks where StemDeck commits to a fixed-tempo grid | **99.6%** |
+
+The gap between the two rows is the half-time/double-time question (is drum & bass 87 or
+174?), which is a convention rather than a fact; annotators disagree with each other on it.
+StemDeck doubles anything it reads below 78 BPM, flags readings of 78-100 that look like
+half-time, and gives you **÷2** / **×2** buttons. On tracks where StemDeck and the
+annotation disagreed by 1-2 BPM, an independent method confirmed StemDeck's value in all seven
+cases I checked (the annotations were tapped by hand).
+
+**Playback engine.** With the engine under a stream of random fader moves, mutes and seeks
+while the controlling program hogged its own CPU, the slowest audio block took 0.7 ms
+against a budget of 5.8 ms, with no buffer underruns. Mixing one block takes about 0.04 ms.
+
+**Cache.** A four-minute song takes about 150 MB on disk and reloads in under a second.
+
+**Separation.** Output matches reference Demucs to within rounding error, so stem quality
+is exactly that of the published model. Speed on this build machine's 4-core CPU: about
+2x real time for the Fast model. GPU speed is the open question the benchmark answers.
+
+
 
 ---
 

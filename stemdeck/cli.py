@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.add_argument("--grid", action="store_true", help="include every beat time in --json output")
     p.add_argument("--no-stems", action="store_true",
-                   help="analyse the plain mix without separating first (faster, less accurate key)")
+                   help="analyse the file directly, without separating and caching it first (faster)")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("bench", help="separation benchmark", add_help=False)

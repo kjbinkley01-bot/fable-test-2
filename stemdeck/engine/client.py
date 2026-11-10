@@ -157,23 +157,33 @@ class EngineClient:
         if self._cmd is not None and self.is_alive():
             self._cmd.put(cmd)
 
-    def load(self, deck: int, stems: np.ndarray) -> int:
-        """Give a deck a song. ``stems``: (n_stems, frames, 2) float32.
+    def load(self, deck: int, stems) -> int:
+        """Give a deck a song.
+
+        ``stems`` is either one array (n_stems, frames, 2) or a sequence of
+        n_stems arrays (frames, 2), float32, in config.STEMS order. The audio
+        is copied once, straight into memory shared with the engine.
 
         Returns a serial number; ``status().decks[deck].serial`` equals it
         once the engine has switched to the new song.
         """
-        if stems.ndim != 3 or stems.shape[0] != len(STEMS) or stems.shape[2] != 2:
-            raise ValueError(f"expected stems of shape ({len(STEMS)}, frames, 2), got {stems.shape}")
-        shm = shared_memory.SharedMemory(create=True, size=max(1, stems.nbytes))
-        view = np.ndarray(stems.shape, dtype=np.float32, buffer=shm.buf)
-        view[:] = stems
+        parts = [np.asarray(part) for part in stems]
+        if len(parts) != len(STEMS) or any(p.ndim != 2 or p.shape[1] != 2 for p in parts):
+            raise ValueError(f"expected {len(STEMS)} stems of shape (frames, 2)")
+        n_frames = parts[0].shape[0]
+        if any(p.shape[0] != n_frames for p in parts):
+            raise ValueError("all stems must have the same length")
+        shape = (len(STEMS), n_frames, 2)
+        shm = shared_memory.SharedMemory(create=True, size=max(1, 4 * len(STEMS) * n_frames * 2))
+        view = np.ndarray(shape, dtype=np.float32, buffer=shm.buf)
+        for i, part in enumerate(parts):
+            view[i] = part
         del view
         self._serial += 1
         old = self._stem_shm.get(deck)
         self._stem_shm[deck] = shm
         self._deck_serial[deck] = self._serial
-        self._send("load", deck, shm.name, int(stems.shape[1]), self._serial)
+        self._send("load", deck, shm.name, int(n_frames), self._serial)
         if old is not None:
             self._retired.append((time.monotonic(), old))
         return self._serial

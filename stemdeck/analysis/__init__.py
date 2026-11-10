@@ -19,10 +19,6 @@ from .key import KeyResult, detect_key
 #: Bump when BPM / key / grid logic changes; cached songs are then re-analysed.
 ANALYSIS_VERSION = 1
 
-#: Stems fed to the key detector. Drums carry no key information and smear
-#: energy across every note, so they are left out when stems are available.
-KEY_STEMS: tuple[str, ...] = ("vocals", "bass", "other")
-
 __all__ = [
     "ANALYSIS_VERSION", "AnalysisResult", "BeatGrid", "KeyResult",
     "analyze", "analyze_audio", "analyze_file",
@@ -36,7 +32,7 @@ class AnalysisResult:
     key: KeyResult
     grid: BeatGrid
     duration: float
-    key_source: str = "mix"       # "stems" (drums removed) or "mix"
+    key_source: str = "mix"       # what the key detector listened to
     version: int = ANALYSIS_VERSION
 
     def to_dict(self, include_grid: bool = True) -> dict:
@@ -84,17 +80,17 @@ class AnalysisResult:
 def analyze(stems: dict[str, np.ndarray], device: str = "cpu",
             bpm_range: tuple[float, float] = DEFAULT_BPM_RANGE) -> AnalysisResult:
     """Analyse a separated song. ``stems`` maps stem name -> (frames, 2)."""
+    # Both detectors listen to the full mix (the stems added back together).
+    # Leaving the drums out for key detection was measured and made no
+    # difference (see tools/README.md), so the simpler input is used; it is
+    # also what the key model was trained on.
     mix = np.sum([stems[name] for name in STEMS], axis=0, dtype=np.float32)
-    grid = analyze_beats(mix, device=device, bpm_range=bpm_range)
-    key_audio = np.sum([stems[name] for name in KEY_STEMS], axis=0, dtype=np.float32)
-    key = detect_key(key_audio)
-    return AnalysisResult(bpm=grid.bpm, key=key, grid=grid,
-                          duration=mix.shape[0] / SAMPLE_RATE, key_source="stems")
+    return analyze_audio(mix, device=device, bpm_range=bpm_range)
 
 
 def analyze_audio(audio: np.ndarray, device: str = "cpu",
                   bpm_range: tuple[float, float] = DEFAULT_BPM_RANGE) -> AnalysisResult:
-    """Analyse a plain mix without stems (quicker, key slightly less reliable)."""
+    """Analyse a mix: (frames, 2) float32 at 44.1 kHz."""
     grid = analyze_beats(audio, device=device, bpm_range=bpm_range)
     key = detect_key(audio)
     return AnalysisResult(bpm=grid.bpm, key=key, grid=grid,

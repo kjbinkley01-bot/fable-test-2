@@ -73,7 +73,7 @@ if errorlevel 1 (
 )
 
 rem ---- 5. Download the AI models so the first song does not wait for them ---
-echo [4/5] Downloading models (about 700 MB, one time) ...
+echo [4/5] Downloading models (about 500 MB, one time) ...
 "%VPY%" -m stemdeck.fetch_models
 if errorlevel 1 (
     echo Model download failed - they will be downloaded on first use instead.
