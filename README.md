@@ -31,7 +31,8 @@ winget install -e --id Python.Python.3.12
 
 Close and reopen the terminal afterwards.
 
-**3. Get the code** and go into its folder:
+**3. Get the code** and go into its folder. If `git` is not installed yet, run
+`winget install -e --id Git.Git` first and reopen the terminal.
 
 ```bat
 git clone https://github.com/kjbinkley01-bot/fable-test-2.git StemDeck
