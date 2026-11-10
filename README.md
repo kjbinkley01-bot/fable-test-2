@@ -21,7 +21,7 @@ You need Windows 11 and an up-to-date AMD Adrenalin driver. Do the steps in orde
 
 **1. Update the graphics driver.** Install the latest *AMD Software: Adrenalin Edition*
 (26.10 or newer) from amd.com. AMD's GPU computing layer (ROCm) is delivered partly through
-the driver, so an old driver is the most common reason the GPU is not found.
+the driver, so an old driver can stop the GPU from being found.
 
 **2. Install Python 3.12.** Open *Terminal* (right-click the Start button) and run:
 
