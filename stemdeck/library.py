@@ -265,6 +265,13 @@ def load_track(
     )
 
 
+def save_analysis(track: Track) -> None:
+    """Store a changed analysis (e.g. tempo doubled by hand) for a cached song."""
+    folder = entry_dir(track.track_id, track.model)
+    if (folder / "meta.json").is_file():
+        _save_analysis(folder, track.analysis)
+
+
 def cache_size_bytes() -> int:
     return sum(p.stat().st_size for p in cache_dir().rglob("*") if p.is_file())
 

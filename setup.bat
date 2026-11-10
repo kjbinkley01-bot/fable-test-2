@@ -84,6 +84,8 @@ echo [5/5] Checking the GPU ...
 echo.
 "%VPY%" -m stemdeck devices
 echo.
+call make_shortcut.bat
+echo.
 echo Setup finished.
 echo   Next: run  benchmark.bat  to measure separation speed,
 echo   then double-click  StemDeck.bat  to start the app.

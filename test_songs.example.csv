@@ -1,0 +1,9 @@
+# One song per line: path to the file, BPM and key as shown by Beatport or Mixed In Key.
+# The key can be written any way those tools show it: "A minor", "Am", "A min", "8A", "F# maj" ...
+# Lines starting with # are ignored. Copy this file to test_songs.csv and edit it.
+file,bpm,key
+C:\Music\House Track.mp3,124,A minor
+C:\Music\Drum and Bass Track.flac,174,11B
+C:\Music\Hip Hop Track.mp3,92,F# min
+C:\Music\Pop Song.wav,118,C major
+C:\Music\Techno Track.mp3,132,5A

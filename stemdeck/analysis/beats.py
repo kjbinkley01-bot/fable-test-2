@@ -29,9 +29,13 @@ logger = logging.getLogger(__name__)
 
 FPS = 50.0  # frames per second of the beat model's output
 
-#: BPM values outside this range are doubled / halved into it, the convention
-#: DJ software uses (a 65 BPM hip-hop track is shown as 130).
-DEFAULT_BPM_RANGE = (70.0, 200.0)
+#: BPM values outside this range are doubled / halved into it. Whether a song
+#: is "70" or "140" is a convention, not a fact, and DJ tools all pick a range.
+#: This one was chosen on 661 annotated dance tracks: a reading near 70 almost
+#: always means 140 (dubstep, trap), while readings of 80-100 are genuinely
+#: slow about as often as they are half-time drum & bass, so they are left
+#: alone and flagged instead (the app has x2 / /2 buttons for those).
+DEFAULT_BPM_RANGE = (78.0, 200.0)
 
 _models: dict[str, object] = {}
 _models_lock = threading.Lock()
@@ -64,6 +68,33 @@ class BeatGrid:
             data["beats"] = [round(float(t), 5) for t in self.beats]
             data["downbeats"] = [round(float(t), 5) for t in self.downbeats]
         return data
+
+    def rescaled(self, factor: float) -> "BeatGrid":
+        """The same grid counted at double (factor 2) or half (factor 0.5) time."""
+        if factor not in (0.5, 2.0) or len(self.beats) < 2:
+            return self
+        if factor == 2.0:
+            mids = (self.beats[:-1] + self.beats[1:]) / 2.0
+            beats = np.sort(np.concatenate([self.beats, mids]))
+        else:
+            # keep the beats the downbeats sit on
+            start = 0
+            if len(self.downbeats):
+                start = int(np.abs(self.beats - self.downbeats[0]).argmin()) % 2
+            beats = self.beats[start::2]
+        if len(self.downbeats):
+            first = int(np.abs(beats - self.downbeats[0]).argmin()) % self.beats_per_bar
+            downbeats = beats[first::self.beats_per_bar]
+        else:
+            downbeats = beats[::self.beats_per_bar]
+        notes = [n for n in self.notes if "double time" not in n and "half time" not in n]
+        notes.append("tempo doubled by hand" if factor == 2.0 else "tempo halved by hand")
+        return BeatGrid(
+            bpm=self.bpm * factor, beats=beats, downbeats=downbeats,
+            beats_per_bar=self.beats_per_bar, is_constant=self.is_constant,
+            anchor=float(downbeats[0]) if len(downbeats) else float(beats[0]),
+            confidence=self.confidence, detected_bpm=self.detected_bpm, notes=notes,
+        )
 
     @classmethod
     def from_dict(cls, data: dict) -> "BeatGrid":
@@ -145,15 +176,24 @@ def pick_peaks(logits: np.ndarray, fps: float = FPS) -> np.ndarray:
     return np.asarray(times) / fps
 
 
-def detect_beats(audio: np.ndarray, device: str = "cpu") -> tuple[np.ndarray, np.ndarray]:
-    """Return (beat_times, downbeat_times) as detected, before grid fitting."""
-    beat_logits, downbeat_logits = beat_activations(audio, device)
+def beats_from_activations(beat_logits: np.ndarray, downbeat_logits: np.ndarray
+                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Logits -> (beat_times, downbeat_times, beat_weights, activation)."""
+    activation = 1.0 / (1.0 + np.exp(-beat_logits))
     beats = pick_peaks(beat_logits)
     downbeats = pick_peaks(downbeat_logits)
     if len(beats) and len(downbeats):
         # A downbeat is by definition also a beat: snap each to its nearest beat.
         nearest = np.abs(beats[None, :] - downbeats[:, None]).argmin(axis=1)
         downbeats = np.unique(beats[nearest])
+    frames = np.clip(np.round(beats * FPS).astype(int), 0, max(0, len(activation) - 1))
+    weights = activation[frames] if len(activation) else np.zeros(0)
+    return beats, downbeats, weights, activation
+
+
+def detect_beats(audio: np.ndarray, device: str = "cpu") -> tuple[np.ndarray, np.ndarray]:
+    """Return (beat_times, downbeat_times) as detected, before grid fitting."""
+    beats, downbeats, _, _ = beats_from_activations(*beat_activations(audio, device))
     return beats, downbeats
 
 
@@ -165,28 +205,74 @@ def _mode(values: np.ndarray, default: int) -> int:
     return int(vals[counts.argmax()])
 
 
-def _best_ruler(beats: np.ndarray, period: float) -> tuple[float, float]:
-    """Find offset ``a`` and spacing ``b`` so that a + n*b lands on the beats.
+def _ruler_candidates(activation: np.ndarray | None, beats: np.ndarray, weights: np.ndarray,
+                      duration: float, max_candidates: int = 8) -> list[tuple[float, float]]:
+    """Candidate rulers (offset a, spacing b) from the rhythm of the beat evidence.
 
-    For a candidate spacing, every beat is placed on a clock face whose full
-    turn is one beat. If the spacing is right all beats point the same way;
-    the length of their average is the score. We scan spacings within +/-6%
-    of the typical gap between beats and keep the best.
+    A steady beat is a regular pulse, and a regular pulse shows up as a sharp
+    line in a frequency analysis at "beats per second". We take the strongest
+    such lines as candidate tempos; the angle of each line says where its
+    beats fall. This uses every bit of the tracker's evidence at once, so a
+    stretch where the tracker hesitated or doubled up does not derail it.
     """
-    length = max(beats[-1] - beats[0], period)
-    f0 = 1.0 / period
-    freqs = np.arange(f0 * 0.94, f0 * 1.06, 1.0 / (40.0 * length))
-    best_f, best_score = f0, -1.0
-    for chunk in np.array_split(freqs, max(1, len(freqs) * len(beats) // 2_000_000 + 1)):
-        phases = np.exp(2j * np.pi * chunk[:, None] * beats[None, :])
-        scores = np.abs(phases.sum(axis=1))
-        i = int(scores.argmax())
-        if scores[i] > best_score:
-            best_score, best_f = float(scores[i]), float(chunk[i])
-    b = 1.0 / best_f
-    angle = np.angle(np.exp(2j * np.pi * best_f * beats).sum())
-    a = (angle / (2 * np.pi)) * b  # a beat sits where the clock hand points
-    return float(a), float(b)
+    fmin, fmax = 0.75, 4.6            # 45 .. 276 beats per minute
+    if activation is not None and len(activation) > 64:
+        size = 1 << int(np.ceil(np.log2(len(activation) * 32)))
+        spec = np.fft.rfft(activation - activation.mean(), size)
+        freqs = np.fft.rfftfreq(size, 1.0 / FPS)
+    else:
+        freqs = np.arange(fmin, fmax, 1.0 / (32.0 * max(duration, 1.0)))
+        spec = np.zeros(len(freqs), dtype=np.complex128)
+        for start in range(0, len(freqs), 4096):
+            chunk = freqs[start:start + 4096]
+            spec[start:start + 4096] = (weights[None, :] * np.exp(
+                -2j * np.pi * chunk[:, None] * beats[None, :])).sum(axis=1)
+    band = np.flatnonzero((freqs >= fmin) & (freqs <= fmax))
+    if len(band) < 3:
+        return []
+    mag = np.abs(spec[band])
+    peaks = np.flatnonzero((mag[1:-1] > mag[:-2]) & (mag[1:-1] >= mag[2:])) + 1
+    peaks = peaks[mag[peaks] >= 0.25 * mag.max()]
+    peaks = peaks[np.argsort(mag[peaks])[::-1]][:max_candidates]
+    out = []
+    for p in peaks:
+        f = float(freqs[band[p]])
+        angle = float(np.angle(spec[band[p]]))
+        out.append(((-angle / (2 * np.pi)) / f, 1.0 / f))   # beats fall where the wave peaks
+    return out
+
+
+def _grid_quality(beats: np.ndarray, weights: np.ndarray, a: float, b: float,
+                  tolerance: float) -> tuple[float, float, float, np.ndarray, np.ndarray]:
+    """How well the ruler a + n*b explains the detected beats.
+
+    precision: share of detected beats (weighted by confidence) that sit on a mark.
+    coverage:  share of marks, between the first and last beat, that have a beat.
+    Returns (score, precision, coverage, index of each beat, on-grid mask).
+    """
+    index = np.round((beats - a) / b)
+    on_grid = np.abs(beats - (a + b * index)) < tolerance
+    if not on_grid.any():
+        return 0.0, 0.0, 0.0, index, on_grid
+    precision = float(weights[on_grid].sum() / weights.sum())
+    n_marks = np.round((beats[-1] - beats[0]) / b) + 1
+    coverage = float(min(1.0, len(np.unique(index[on_grid])) / max(1.0, n_marks)))
+    score = 2 * precision * coverage / (precision + coverage)
+    return score, precision, coverage, index, on_grid
+
+
+def _between_beat_evidence(activation: np.ndarray, a: float, b: float, duration: float) -> float:
+    """Tracker activity half way between grid beats, relative to on the beats."""
+    n = np.arange(int(np.ceil(-a / b)), int(np.floor((duration - a) / b)))
+    if len(n) < 8 or len(activation) < 8:
+        return 0.0
+
+    def sample(times: np.ndarray) -> np.ndarray:
+        frames = np.clip(np.round(times * FPS).astype(int), 1, len(activation) - 2)
+        return np.maximum(np.maximum(activation[frames - 1], activation[frames]), activation[frames + 1])
+
+    on = float(sample(a + n * b).mean())
+    return float(sample(a + (n + 0.5) * b).mean()) / on if on > 1e-6 else 0.0
 
 
 def fit_grid(
@@ -195,8 +281,15 @@ def fit_grid(
     duration: float,
     bpm_range: tuple[float, float] = DEFAULT_BPM_RANGE,
     tolerance: float = 0.035,
+    activation: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
 ) -> BeatGrid:
-    """Build the beat grid from detected beats (see module docstring)."""
+    """Build the beat grid from detected beats (see module docstring).
+
+    ``activation`` (the tracker's frame-by-frame beat probability) and
+    ``weights`` (its confidence in each detected beat) are optional extras
+    that make the tempo search more robust.
+    """
     beats = np.asarray(beats, dtype=np.float64)
     downbeats = np.asarray(downbeats, dtype=np.float64)
     if len(beats) < 4:
@@ -207,14 +300,19 @@ def fit_grid(
     intervals = np.diff(beats)
     period = float(np.median(intervals))
 
-    # Find the evenly spaced ruler (period b, offset a) that the detected
-    # beats agree with best. Scoring every candidate tempo against all beats
-    # at once is robust to the tracker adding or dropping a beat here and
-    # there, which would throw off a simple "count the beats" approach.
-    a, b = _best_ruler(beats, period)
-    index = np.round((beats - a) / b)
-    resid = np.abs(beats - (a + b * index))
-    inliers = resid < tolerance
+    weights = np.ones(len(beats)) if weights is None else np.asarray(weights, dtype=np.float64)
+
+    # Find the evenly spaced ruler (offset a, spacing b) that explains the
+    # detected beats best, among the tempos the rhythm analysis proposes.
+    best = None
+    for cand_a, cand_b in _ruler_candidates(activation, beats, weights, duration):
+        quality = _grid_quality(beats, weights, cand_a, cand_b, tolerance)
+        if best is None or quality[0] > best[0][0]:
+            best = (quality, cand_a, cand_b)
+    if best is None:
+        best = (_grid_quality(beats, weights, float(beats[0]), period, tolerance), float(beats[0]), period)
+    (score, precision, coverage, index, inliers), a, b = best
+
     # Polish with a straight-line fit through the beats that sit on the ruler.
     for _ in range(3):
         _, first = np.unique(index[inliers], return_index=True)
@@ -222,16 +320,11 @@ def fit_grid(
             break
         sel = np.flatnonzero(inliers)[first]
         b, a = (float(v) for v in np.polyfit(index[sel], beats[sel], 1))
-        index = np.round((beats - a) / b)
-        resid = np.abs(beats - (a + b * index))
-        inliers = resid < tolerance
+        score, precision, coverage, index, inliers = _grid_quality(beats, weights, a, b, tolerance)
 
-    on_grid = np.unique(index[inliers])
-    precision = float(inliers.mean())                       # detected beats that fit
-    span = index[inliers].max() - index[inliers].min() + 1 if inliers.any() else 1
-    coverage = float(len(on_grid) / span)                   # ruler marks that have a beat
-    confidence = min(precision, coverage)
-    is_constant = len(on_grid) >= 16 and precision >= 0.8 and coverage >= 0.6 and b > 0
+    confidence = float(score)
+    n_on_grid = len(np.unique(index[inliers])) if inliers.any() else 0
+    is_constant = n_on_grid >= 16 and score >= 0.65 and b > 0
 
     # Bar length and which beat is the "one".
     beat_of_down = np.abs(beats[None, :] - downbeats[:, None]).argmin(axis=1) if len(downbeats) else np.zeros(0, int)
@@ -259,6 +352,12 @@ def fit_grid(
                 b *= 2
             notes.append(f"tempo halved from {detected_bpm:.1f} into the DJ range")
         phase %= beats_per_bar
+        if 78.0 <= bpm < 100.0 and activation is not None and bpm == detected_bpm:
+            # Strong evidence of beats half way between ours suggests the song
+            # may really be twice as fast (typical for drum & bass).
+            if _between_beat_evidence(activation, a, b, duration) >= 0.12:
+                notes.append(f"could also be counted in double time ({2 * bpm:.0f} BPM), "
+                             "common for drum & bass: use the x2 button if so")
         n_first = int(np.ceil((0.0 - a) / b - 1e-9))
         n_last = int(np.floor((duration - a) / b + 1e-9))
         n = np.arange(n_first, n_last + 1)
@@ -271,7 +370,7 @@ def fit_grid(
                         confidence=confidence, detected_bpm=detected_bpm, notes=notes)
 
     # Variable tempo: keep the detected beats, report the typical tempo.
-    detected_bpm = 60.0 / period
+    detected_bpm = 60.0 / b if (score >= 0.4 and b > 0) else 60.0 / period
     bpm = detected_bpm
     grid_beats = beats
     grid_downbeats = downbeats
@@ -299,8 +398,14 @@ def fit_grid(
                     confidence=confidence, detected_bpm=detected_bpm, notes=notes)
 
 
+def grid_from_activations(beat_logits: np.ndarray, downbeat_logits: np.ndarray, duration: float,
+                          bpm_range: tuple[float, float] = DEFAULT_BPM_RANGE) -> BeatGrid:
+    beats, downbeats, weights, activation = beats_from_activations(beat_logits, downbeat_logits)
+    return fit_grid(beats, downbeats, duration, bpm_range, activation=activation, weights=weights)
+
+
 def analyze_beats(audio: np.ndarray, device: str = "cpu",
                   bpm_range: tuple[float, float] = DEFAULT_BPM_RANGE) -> BeatGrid:
     """Detect beats in (frames, 2) audio at 44.1 kHz and build the grid."""
-    beats, downbeats = detect_beats(audio, device)
-    return fit_grid(beats, downbeats, audio.shape[0] / SAMPLE_RATE, bpm_range)
+    beat_logits, downbeat_logits = beat_activations(audio, device)
+    return grid_from_activations(beat_logits, downbeat_logits, audio.shape[0] / SAMPLE_RATE, bpm_range)
