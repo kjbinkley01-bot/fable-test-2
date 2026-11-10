@@ -52,6 +52,7 @@ class WaveformView(QWidget):
         self._playhead = 0.0
         self._cache: QPixmap | None = None
         self._cache_start = 0.0
+        self._cache_dpr = 1.0
         self._cache_key: tuple | None = None
 
     # ------------------------------------------------------------------ data
@@ -161,28 +162,37 @@ class WaveformView(QWidget):
         self.update()
 
     # --------------------------------------------------------------- drawing
-    def _lane_geometry(self) -> list[tuple[int, int]]:
-        """(top, height) of each lane, below the ruler."""
-        h = max(4, self.height() - RULER_HEIGHT)
-        edges = [RULER_HEIGHT + round(i * h / len(STEMS)) for i in range(len(STEMS) + 1)]
+    def _lane_geometry(self, scale: float = 1.0) -> list[tuple[int, int]]:
+        """(top, height) of each lane below the ruler, in pixels * ``scale``."""
+        ruler = round(RULER_HEIGHT * scale)
+        h = max(4, round(self.height() * scale) - ruler)
+        edges = [ruler + round(i * h / len(STEMS)) for i in range(len(STEMS) + 1)]
         return [(edges[i], edges[i + 1] - edges[i]) for i in range(len(STEMS))]
 
     def _render_cache(self) -> None:
-        width, height = self.width(), self.height()
-        cache_w = width if self._fit else width * 3
+        # Windows display scaling (125%, 150% ...) means one logical pixel is
+        # more than one physical pixel. Render at physical resolution so the
+        # waveform stays sharp instead of being stretched.
+        dpr = self.devicePixelRatioF()
+        width = self.width()
+        view_px = max(1, round(width * dpr))
+        height = max(1, round(self.height() * dpr))
+        cache_w = view_px if self._fit else view_px * 3
+        fpp = self._fpp / dpr                         # frames per physical pixel
         start = 0.0 if self._fit else self._view_start - width * self._fpp
+        ruler = round(RULER_HEIGHT * dpr)
         img = np.empty((height, cache_w, 4), dtype=np.uint8)
         img[:, :, 3] = 255
         img[:, :, 0], img[:, :, 1], img[:, :, 2] = BACKGROUND[2], BACKGROUND[1], BACKGROUND[0]
-        img[:RULER_HEIGHT, :, 0:3] = (RULER_BG[2], RULER_BG[1], RULER_BG[0])
+        img[:ruler, :, 0:3] = (RULER_BG[2], RULER_BG[1], RULER_BG[0])
 
-        for i, (name, (top, lane_h)) in enumerate(zip(STEMS, self._lane_geometry())):
+        for i, (name, (top, lane_h)) in enumerate(zip(STEMS, self._lane_geometry(dpr))):
             if i % 2:
                 img[top:top + lane_h, :, 0:3] = (LANE_ALT[2], LANE_ALT[1], LANE_ALT[0])
             pk = self._peaks.get(name)
             if pk is None:
                 continue
-            cols = pk.columns(start, self._fpp, cache_w) * self._scale
+            cols = pk.columns(start, fpp, cache_w) * self._scale
             mid = (lane_h - 1) / 2.0
             half = max(1.0, mid - 2)
             y_top = np.clip(np.floor(mid - cols[:, 1] * half), 0, lane_h - 1)
@@ -197,14 +207,16 @@ class WaveformView(QWidget):
             lane = img[top:top + lane_h]
             lane[mask] = (b, g, r, 255)
 
-        self._draw_grid(img, start, cache_w)
+        self._draw_grid(img, start, cache_w, fpp, ruler, max(1, round(dpr)))
 
         qimg = QImage(img.data, cache_w, height, cache_w * 4, QImage.Format.Format_RGB32)
         pixmap = QPixmap.fromImage(qimg)        # copies the pixels
-        self._draw_ruler_labels(pixmap, start, cache_w)
+        pixmap.setDevicePixelRatio(dpr)
+        self._draw_ruler_labels(pixmap, start, cache_w / dpr)
         self._cache = pixmap
         self._cache_start = start
-        self._cache_key = (width, height, self._fpp)
+        self._cache_dpr = dpr
+        self._cache_key = (width, self.height(), self._fpp, dpr)
 
     def _grid_step(self) -> tuple[int, int]:
         """(show every Nth beat, show every Nth bar) for the current zoom."""
@@ -219,28 +231,31 @@ class WaveformView(QWidget):
             bar_step *= 2
         return beat_step, bar_step
 
-    def _draw_grid(self, img: np.ndarray, start: float, cache_w: int) -> None:
+    def _draw_grid(self, img: np.ndarray, start: float, cache_w: int, fpp: float,
+                   ruler: int, line_width: int) -> None:
         grid = self._grid
         if grid is None or len(grid.beats) == 0:
             return
         beat_step, bar_step = self._grid_step()
-        end = start + cache_w * self._fpp
+        end = start + cache_w * fpp
 
         def blend(times: np.ndarray, strength: float, top: int) -> None:
             frames = times * SAMPLE_RATE
             frames = frames[(frames >= start) & (frames < end)]
             if len(frames) == 0:
                 return
-            xs = np.unique(((frames - start) / self._fpp).astype(np.int64))
+            xs = ((frames - start) / fpp).astype(np.int64)
+            xs = np.unique(np.concatenate([xs + k for k in range(line_width)]))
             xs = xs[(xs >= 0) & (xs < cache_w)]
             region = img[top:, xs, 0:3].astype(np.float32)
             img[top:, xs, 0:3] = (region + (255.0 - region) * strength).astype(np.uint8)
 
         if beat_step:
-            blend(grid.beats, 0.10, RULER_HEIGHT)
-        blend(grid.downbeats[::bar_step], 0.30, RULER_HEIGHT - 8)
+            blend(grid.beats, 0.10, ruler)
+        blend(grid.downbeats[::bar_step], 0.30, ruler - round(ruler * 0.36))
 
-    def _draw_ruler_labels(self, pixmap: QPixmap, start: float, cache_w: int) -> None:
+    def _draw_ruler_labels(self, pixmap: QPixmap, start: float, cache_w: float) -> None:
+        """Bar numbers along the top. Coordinates here are logical pixels."""
         grid = self._grid
         painter = QPainter(pixmap)
         painter.setPen(QColor("#8a93a0"))
@@ -274,14 +289,17 @@ class WaveformView(QWidget):
             painter.end()
             return
         width = self.width()
-        key = (width, self.height(), self._fpp)
+        dpr = self.devicePixelRatioF()
+        key = (width, self.height(), self._fpp, dpr)
         if self._cache is None or self._cache_key != key:
             self._render_cache()
-        offset = (self._view_start - self._cache_start) / self._fpp
-        if offset < 0 or offset + width > self._cache.width():
+        offset = (self._view_start - self._cache_start) / self._fpp          # logical pixels
+        if offset < 0 or (offset + width) * dpr > self._cache.width():
             self._render_cache()
             offset = (self._view_start - self._cache_start) / self._fpp
-        painter.drawPixmap(QPointF(0, 0), self._cache, QRectF(offset, 0, width, self.height()))
+        # The source rectangle of a high-DPI pixmap is given in physical pixels.
+        painter.drawPixmap(QRectF(0, 0, width, self.height()), self._cache,
+                           QRectF(offset * dpr, 0, width * dpr, self.height() * dpr))
         # beyond the end of the song
         end_x = (self._n_frames - self._view_start) / self._fpp
         if end_x < width:

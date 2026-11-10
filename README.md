@@ -158,6 +158,7 @@ home note), because that is where key detectors usually disagree with each other
 | Stem volume | Fader on each strip; double-click resets to 0 dB |
 | Mute / solo | **M** / **S** on each strip, or `1`-`4` (mute) and `Shift+1`-`4` (solo) |
 | Export | **Export…** (`Ctrl+E`): one mixed file, or a separate file per stem |
+| Half / double tempo | **÷2** / **×2** next to the BPM; the choice is remembered for that song |
 | Model | **Best quality** (default) or **Fast**, top right; applies to songs loaded afterwards |
 
 Thin lines on the waveform are beats, brighter lines are downbeats (bar starts), and the
@@ -227,8 +228,8 @@ what you hear as clicks.
 ### Cache
 
 A song is recognised by a fingerprint of the file's contents, not its name, so renaming or
-moving a file still finds the cached result. Stems are stored losslessly (24-bit FLAC, about
-120 MB for a four-minute song) under `%LOCALAPPDATA%\StemDeck\library`. Delete that folder to
+moving a file still finds the cached result. Stems are stored losslessly (24-bit FLAC, roughly
+150 MB for a four-minute song) under `%LOCALAPPDATA%\StemDeck\library`. Delete that folder to
 free the space; songs are simply separated again next time.
 
 ---

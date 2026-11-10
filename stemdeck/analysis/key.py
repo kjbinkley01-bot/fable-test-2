@@ -1,7 +1,15 @@
 """Musical key detection.
 
 Pipeline: note-energy features (keyfeatures.py) -> a small neural network
-that scores all 24 keys -> the best key, with a confidence and runner-ups.
+that scores all 24 keys, nudged by a classic music-theory key profile ->
+the best key, with a confidence and runner-ups.
+
+Why two ingredients: the network learned from dance music and is the more
+accurate of the two there. The key profiles (Krumhansl & Kessler's
+measurements of how well each note "fits" a key) know textbook harmony,
+which dance music rarely uses. Adding them at a small weight leaves the
+dance-music score unchanged and fixes plain chord progressions the network
+alone got wrong, so it is a cheap safeguard for other genres.
 
 The network's weights live in ``key_model.npz`` next to this file. It was
 trained on ~1,400 dance tracks with human-checked key labels and scored on
@@ -23,6 +31,13 @@ from .camelot import camelot_code, display_key, key_name
 from .keyfeatures import N_SEMITONES, semitone_spectrogram, window_features
 
 MODEL_PATH = Path(__file__).with_name("key_model.npz")
+
+#: Krumhansl-Kessler key profiles: perceived fit of each of the 12 notes
+#: (starting from the key's home note) in a major and in a minor key.
+KK_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+KK_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+#: Weight of the profile match relative to the network (chosen on held-out data).
+THEORY_WEIGHT = 2.0
 
 
 @dataclass
@@ -71,13 +86,23 @@ def _load_model() -> dict:
     return {
         "layers": layers,
         "shifts": [int(s) for s in data["shifts"]],
+        "bank": str(data["meta_bank"]) if "meta_bank" in data else "linear",
         "window": float(data["meta_window"]),
         "hop": float(data["meta_hop"]),
     }
 
 
-def _shift_bank(x: np.ndarray, shifts: list[int]) -> np.ndarray:
-    """(B, 72) -> (B, 12, 72); row k has pitch class k moved onto C."""
+def _shift_bank(x: np.ndarray, shifts: list[int], kind: str) -> np.ndarray:
+    """(B, 72) -> (B, 12, 72): row k is the note picture as seen from pitch class k.
+
+    "octave": the twelve notes of every octave are rotated so that pitch
+    class k comes first. "linear" (older models): the whole picture is slid
+    so pitch class k lands on C.
+    """
+    if kind == "octave":
+        octaves = x.reshape(x.shape[0], -1, 12)
+        return np.stack([np.roll(octaves, -k, axis=2).reshape(x.shape[0], -1) for k in range(12)],
+                        axis=1).astype(np.float32)
     out = np.zeros((x.shape[0], len(shifts), x.shape[1]), dtype=np.float32)
     for k, s in enumerate(shifts):
         if s == 0:
@@ -89,13 +114,13 @@ def _shift_bank(x: np.ndarray, shifts: list[int]) -> np.ndarray:
     return out
 
 
-def key_probabilities(windows: np.ndarray) -> np.ndarray:
-    """Per-window features (n, 72) -> probabilities for the 24 keys.
+def network_log_probabilities(windows: np.ndarray) -> np.ndarray:
+    """Per-window features (n, 72) -> the network's log-probabilities for the 24 keys.
 
-    Index 0-11: C..B major, 12-23: C..B minor.
+    Index 0-11: C..B major, 12-23: C..B minor. Windows vote by averaging.
     """
     model = _load_model()
-    h = _shift_bank(windows.astype(np.float32), model["shifts"])
+    h = _shift_bank(windows.astype(np.float32), model["shifts"], model["bank"])
     for i, (w, b) in enumerate(model["layers"]):
         h = h @ w.T + b
         if i < len(model["layers"]) - 1:
@@ -103,8 +128,31 @@ def key_probabilities(windows: np.ndarray) -> np.ndarray:
     logits = np.concatenate([h[:, :, 0], h[:, :, 1]], axis=1)          # (n, 24)
     logits -= logits.max(axis=1, keepdims=True)
     logp = logits - np.log(np.exp(logits).sum(axis=1, keepdims=True))
-    mean = logp.mean(axis=0)                                           # vote across the song
-    p = np.exp(mean - mean.max())
+    return logp.mean(axis=0)
+
+
+def theory_scores(semitones: np.ndarray) -> np.ndarray:
+    """How well the song's overall note content matches each key's profile (-1..1)."""
+    mean = semitones.mean(axis=0)
+    level = float(mean.mean())
+    if level <= 1e-12:
+        return np.zeros(24)
+    chroma = np.log1p(10.0 * mean / level).reshape(-1, 12).sum(axis=0)   # fold octaves
+    major = [np.corrcoef(chroma, np.roll(KK_MAJOR, k))[0, 1] for k in range(12)]
+    minor = [np.corrcoef(chroma, np.roll(KK_MINOR, k))[0, 1] for k in range(12)]
+    return np.nan_to_num(np.array(major + minor))
+
+
+def key_probabilities(windows: np.ndarray, semitones: np.ndarray | None = None) -> np.ndarray:
+    """Probabilities for the 24 keys (0-11 major, 12-23 minor).
+
+    With ``semitones`` (the full note-energy spectrogram) the music-theory
+    profile match is blended in; without, the network alone decides.
+    """
+    scores = network_log_probabilities(windows)
+    if semitones is not None:
+        scores = scores + THEORY_WEIGHT * theory_scores(semitones)
+    p = np.exp(scores - scores.max())
     return p / p.sum()
 
 
@@ -116,7 +164,7 @@ def detect_key(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> KeyResult:
     if len(windows) == 0:
         return KeyResult(0, "major", 0.0, 0.0, [])
     assert windows.shape[1] == N_SEMITONES
-    probs = key_probabilities(windows)
+    probs = key_probabilities(windows, semis)
     order = np.argsort(probs)[::-1]
 
     def describe(idx: int) -> dict:

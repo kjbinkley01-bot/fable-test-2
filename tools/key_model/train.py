@@ -46,8 +46,17 @@ def build_dataset(feats, labels, window, hop):
     return np.concatenate(xs), np.asarray(ys), np.asarray(groups), names
 
 
-def shift_bank(x: torch.Tensor) -> torch.Tensor:
-    """(B, 72) -> (B, 12, 72): row k has pitch class k moved onto C (zero filled)."""
+def shift_bank(x: torch.Tensor, kind: str = "linear") -> torch.Tensor:
+    """(B, 72) -> (B, 12, 72): row k is the picture as seen from pitch class k.
+
+    "linear": slide the whole picture so pitch class k lands on C (zero filled).
+    "octave": rotate the twelve notes within each octave so k comes first. This
+              is exact for every key: no notes fall off the ends.
+    """
+    if kind == "octave":
+        octaves = x.reshape(x.shape[0], -1, 12)                         # (B, 6, 12)
+        return torch.stack([torch.roll(octaves, -k, dims=2).reshape(x.shape[0], -1)
+                            for k in range(12)], dim=1)
     out = x.new_zeros(x.shape[0], 12, x.shape[1])
     for k, s in enumerate(SHIFTS):
         if s == 0:
@@ -59,9 +68,32 @@ def shift_bank(x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def transpose(x: torch.Tensor, y: torch.Tensor, gen: torch.Generator):
+    """Pitch-shift each example by a random -6..+5 semitones (labels follow).
+
+    Teaches the model that a song moved up or down is the same song in a
+    different key, wherever its notes sit relative to the octave boundaries.
+    """
+    shifts = torch.randint(-6, 6, (x.shape[0],), generator=gen)
+    out = torch.zeros_like(x)
+    for s in range(-6, 6):
+        rows = shifts == s
+        if not rows.any():
+            continue
+        if s == 0:
+            out[rows] = x[rows]
+        elif s > 0:
+            out[rows, s:] = x[rows, :-s]
+        else:
+            out[rows, :s] = x[rows, -s:]
+    mode = y // 12
+    return out, mode * 12 + (y % 12 + shifts) % 12
+
+
 class KeyNet(nn.Module):
-    def __init__(self, n_in=72, hidden=(256, 128), dropout=0.3):
+    def __init__(self, n_in=72, hidden=(256, 128), dropout=0.3, bank="linear"):
         super().__init__()
+        self.bank = bank
         layers, prev = [], n_in
         for h in hidden:
             layers += [nn.Linear(prev, h), nn.ReLU(), nn.Dropout(dropout)]
@@ -70,7 +102,7 @@ class KeyNet(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):                       # x: (B, 72) window features
-        scores = self.net(shift_bank(x))        # (B, 12, 2)
+        scores = self.net(shift_bank(x, self.bank))        # (B, 12, 2)
         return torch.cat([scores[:, :, 0], scores[:, :, 1]], dim=1)  # (B, 24)
 
 
@@ -95,10 +127,11 @@ def predict_tracks(model, x, groups):
     return preds
 
 
-def train_model(x, y, epochs, seed, hidden, dropout, lr=2e-3, wd=1e-3, log=None):
+def train_model(x, y, epochs, seed, hidden, dropout, lr=2e-3, wd=1e-3, log=None,
+                bank="linear", transpose_aug=False):
     torch.manual_seed(seed)
     gen = torch.Generator().manual_seed(seed)
-    model = KeyNet(x.shape[1], hidden, dropout)
+    model = KeyNet(x.shape[1], hidden, dropout, bank)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=epochs * ((len(x) + 255) // 256))
     xt, yt = torch.from_numpy(x), torch.from_numpy(y).long()
@@ -109,7 +142,10 @@ def train_model(x, y, epochs, seed, hidden, dropout, lr=2e-3, wd=1e-3, log=None)
         total = 0.0
         for i in range(0, len(perm), 256):
             idx = perm[i:i + 256]
-            loss = loss_fn(model(augment(xt[idx], gen)), yt[idx])
+            xb, yb = xt[idx], yt[idx]
+            if transpose_aug:
+                xb, yb = transpose(xb, yb, gen)
+            loss = loss_fn(model(augment(xb, gen)), yb)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -127,6 +163,7 @@ def export(model: KeyNet, path: str, meta: dict):
         arrays[f"w{i}"] = lin.weight.detach().numpy().astype(np.float32)
         arrays[f"b{i}"] = lin.bias.detach().numpy().astype(np.float32)
     arrays["shifts"] = np.asarray(SHIFTS, dtype=np.int64)
+    arrays["meta_bank"] = np.asarray(model.bank)
     for k, v in meta.items():
         arrays[f"meta_{k}"] = np.asarray(v)
     np.savez_compressed(path, **arrays)
@@ -142,6 +179,8 @@ def main():
     ap.add_argument("--hidden", default="256,128")
     ap.add_argument("--dropout", type=float, default=0.3)
     ap.add_argument("--seeds", type=int, default=1)
+    ap.add_argument("--bank", default="octave", choices=["linear", "octave"])
+    ap.add_argument("--no-transpose-aug", action="store_true")
     ap.add_argument("--also-train-on-test", action="store_true",
                     help="after reporting the held-out score, retrain on everything for shipping")
     ap.add_argument("--out")
@@ -164,7 +203,8 @@ def main():
     scores = []
     for seed in range(args.seeds):
         model = train_model(xtr, ytr, args.epochs, seed, hidden, args.dropout,
-                            log=report if seed == 0 else None)
+                            log=report if seed == 0 else None, bank=args.bank,
+                            transpose_aug=not args.no_transpose_aug)
         p = predict_tracks(model, xte, gte)
         s = summarize([true_te[g] for g in p], [p[g] for g in p])
         scores.append(s)
@@ -177,7 +217,8 @@ def main():
         if args.also_train_on_test:
             x = np.concatenate([xtr, xte])
             y = np.concatenate([ytr, yte])
-            model = train_model(x, y, args.epochs, 0, hidden, args.dropout)
+            model = train_model(x, y, args.epochs, 0, hidden, args.dropout, bank=args.bank,
+                                transpose_aug=not args.no_transpose_aug)
             print(f"retrained on train+test ({len(x)} windows) for shipping")
         export(model, args.out, {
             "window": args.window, "hop": args.hop,

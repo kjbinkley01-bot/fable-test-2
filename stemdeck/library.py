@@ -248,8 +248,9 @@ def load_track(
         raise LoadCancelled() from exc
 
     report("analyze", 0.0, "Detecting BPM, key and beats")
-    device = "cuda:0" if stats.device_kind == "gpu" else "cpu"
-    analysis = analyze(stems, device=device)
+    # Analysis runs on the CPU: it takes a few seconds per song there, and it
+    # keeps the GPU code path limited to the one thing that needs it.
+    analysis = analyze(stems, device="cpu")
 
     report("save", 0.0, "Saving to library")
     peaks = {name: compute_peaks(stems[name]) for name in STEMS}
