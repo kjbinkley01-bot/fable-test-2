@@ -230,7 +230,7 @@ class EngineClient:
         now = time.perf_counter()
         latency = float(snap[proto.ST_LATENCY])
         out = EngineStatus(
-            running=snap[proto.ST_STATE] == 1 and self.is_alive(),
+            running=bool(snap[proto.ST_STATE] == 1) and self.is_alive(),
             sample_rate=int(snap[proto.ST_SAMPLE_RATE] or SAMPLE_RATE),
             latency=latency,
             underflows=int(snap[proto.ST_UNDERFLOWS]),
@@ -243,7 +243,9 @@ class EngineClient:
         for d in range(proto.N_DECKS):
             base = proto.ST_DECK0 + d * proto.DECK_FIELDS
             position = float(snap[base + proto.DK_POSITION])
-            playing = snap[base + proto.DK_PLAYING] == 1.0
+            # bool()/float()/int(): hand plain Python values to the UI. Values read
+            # from the shared array are numpy types, which Qt widgets reject.
+            playing = bool(snap[base + proto.DK_PLAYING] == 1.0)
             n_frames = int(snap[base + proto.DK_FRAMES])
             if playing:
                 # The engine wrote "next frame to render" at time STAMP. What is
@@ -253,8 +255,8 @@ class EngineClient:
                 position += (since - latency) * SAMPLE_RATE
             position = min(max(position, 0.0), float(n_frames))
             out.decks.append(DeckStatus(
-                position=position, playing=playing,
-                ended=snap[base + proto.DK_ENDED] == 1.0, n_frames=n_frames,
+                position=float(position), playing=playing,
+                ended=bool(snap[base + proto.DK_ENDED] == 1.0), n_frames=n_frames,
                 serial=int(snap[base + proto.DK_SERIAL]),
                 stem_peaks=tuple(float(v) for v in snap[base + proto.DK_PEAKS:base + proto.DK_PEAKS + len(STEMS)]),
             ))

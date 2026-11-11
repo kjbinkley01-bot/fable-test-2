@@ -630,7 +630,7 @@ class MainWindow(QMainWindow):
             # ignore engine state that still belongs to the previous song
             current = deck.serial == self._pending_serial
             position = deck.position if current else 0.0
-            playing = deck.playing and current
+            playing = bool(deck.playing and current)
             self.waveform.set_playhead(position, playing)
             self.time_label.setText(f"{format_time(position / SAMPLE_RATE)} / {format_time(self.track.duration)}")
             if playing != self._was_playing:
