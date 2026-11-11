@@ -122,8 +122,30 @@ and to see how the faster model does:
 benchmark.bat --model htdemucs
 ```
 
-**Please send me the full output of the first benchmark run.** I could not run the GPU path
-myself (see *What was and was not tested*).
+### Result on the RX 9070 XT
+
+Measured on the target machine (Windows 11, PyTorch 2.14.0 + ROCm 10.1, default settings:
+Best quality model, full precision, 4 windows at a time):
+
+| | |
+|---|---|
+| Four-minute song, warm | **19.4 s** (12.3x real time) |
+| Four-minute song, first run after install | 43.7 s |
+| Peak GPU memory | 2.1 GB of 16 GB |
+| GPU output compared with CPU | 97.6 dB signal-to-noise: the same audio |
+| Verdict | **PASS** (target: under 60 s) |
+
+The first run is slower because AMD's library tests its GPU routines on first use; AMD ships
+no pre-tuned table for Radeon cards. According to AMD's documentation the results are saved
+to disk, so each combination of model and settings should pay that cost only once. Running
+the benchmark a second time shows whether that holds on this machine: the "cold" time
+should drop towards the "warm" time.
+
+That tuning is also the source of the `MIOpen: Warning` lines seen in early runs
+("File is unreadable ... fdb.txt", "IsEnoughWorkspace ... GemmFwdRest"). An AMD maintainer
+describes the first as "a little misleading": the file it looks for does not exist for
+Radeon cards. StemDeck now hides MIOpen warnings and shows only errors. To see them again,
+run `set MIOPEN_LOG_LEVEL=4` in the terminal before `benchmark.bat`.
 
 ---
 
@@ -244,7 +266,9 @@ free the space; songs are simply separated again next time.
 
 ## What was and was not tested
 
-I built this on a Linux machine with **no AMD GPU, no sound card and no Windows**, so:
+I built this on a Linux machine with **no AMD GPU, no sound card and no Windows**. The GPU
+path has since been confirmed on the target machine by the benchmark (see *Result on the
+RX 9070 XT*).
 
 **Tested here**
 
@@ -260,7 +284,7 @@ I built this on a Linux machine with **no AMD GPU, no sound card and no Windows*
 
 **Only you can test**
 
-- GPU detection and speed on the RX 9070 XT (run `benchmark.bat`).
+- ~~GPU detection and speed on the RX 9070 XT~~ Done: passes, see the benchmark result.
 - Real audio output through Windows (WASAPI), and that it is glitch-free by ear.
 - Drag and drop from Explorer, the Desktop shortcut and the `.bat` files themselves.
 - Stem quality by ear on your own music.
@@ -311,7 +335,8 @@ against a budget of 5.8 ms, with no buffer underruns. Mixing one block takes abo
 
 **Separation.** Output matches reference Demucs to within rounding error, so stem quality
 is exactly that of the published model. Speed on this build machine's 4-core CPU: about
-2x real time for the Fast model. GPU speed is the open question the benchmark answers.
+2x real time for the Fast model; on the RX 9070 XT, 12x real time for the Best quality
+model.
 
 
 
