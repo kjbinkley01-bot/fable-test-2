@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import platform
+import threading
 from dataclasses import asdict, dataclass, field
 
 
@@ -84,8 +85,27 @@ def _gpu_smoke_test(device: str) -> str | None:
     return None
 
 
-def probe_gpu(run_smoke_test: bool = True) -> tuple[DeviceInfo | None, str | None]:
-    """Return (gpu, None) if a working GPU is available, else (None, reason)."""
+_probe_lock = threading.Lock()
+_probed_gpu: DeviceInfo | None = None
+
+
+def probe_gpu(run_smoke_test: bool = True, refresh: bool = False) -> tuple[DeviceInfo | None, str | None]:
+    """Return (gpu, None) if a working GPU is available, else (None, reason).
+
+    A GPU that passed its self-test is remembered for the rest of the session,
+    so the test runs once, not before every song. Failures are not remembered.
+    """
+    global _probed_gpu
+    with _probe_lock:
+        if _probed_gpu is not None and not refresh:
+            return _probed_gpu, None
+        gpu, reason = _probe_gpu(run_smoke_test)
+        if gpu is not None and run_smoke_test:
+            _probed_gpu = gpu
+        return gpu, reason
+
+
+def _probe_gpu(run_smoke_test: bool) -> tuple[DeviceInfo | None, str | None]:
     try:
         import torch
     except Exception as exc:  # pragma: no cover - torch is a hard dependency

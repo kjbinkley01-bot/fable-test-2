@@ -60,3 +60,23 @@ class ExportWorker(QThread):
         except Exception as exc:
             logger.error("export failed:\n%s", traceback.format_exc())
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class ProbeWorker(QThread):
+    """Finds out, once at start-up, whether separation will run on the GPU."""
+
+    result = Signal(object, str)            # DeviceInfo, reason the GPU is not used ("" if it is)
+
+    def __init__(self, preference: str = "auto", parent=None) -> None:
+        super().__init__(parent)
+        self.preference = preference
+
+    def run(self) -> None:
+        try:
+            from ..separation import choose_device
+
+            device, reason = choose_device(self.preference)
+            self.result.emit(device, reason or "")
+        except Exception as exc:
+            logger.error("device check failed:\n%s", traceback.format_exc())
+            self.result.emit(None, f"{type(exc).__name__}: {exc}")

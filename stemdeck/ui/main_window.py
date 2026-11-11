@@ -19,7 +19,7 @@ from ..engine.client import EngineClient, EngineError
 from ..settings import load_settings, save_settings
 from .stem_strip import StemStrip
 from .waveform_view import RULER_HEIGHT, WaveformView
-from .workers import ExportWorker, LoadWorker
+from .workers import ExportWorker, LoadWorker, ProbeWorker
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,9 @@ class MainWindow(QMainWindow):
         )
         self._build_ui()
         self._start_engine()
+        self._probe = ProbeWorker(self.settings.get("device", "auto"), self)
+        self._probe.result.connect(self._on_device_probed)
+        QTimer.singleShot(0, self._probe.start)
 
         self._timer = QTimer(self)
         self._timer.setInterval(16)
@@ -291,9 +294,14 @@ class MainWindow(QMainWindow):
         self.audio_label = QLabel("")
         self.audio_label.setObjectName("dim")
         self.audio_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.device_label = QLabel("Separation: checking GPU …")
+        self.device_label.setObjectName("dim")
+        self.device_label.setToolTip("What new songs will be separated on")
         status_row.addWidget(self.progress)
         status_row.addWidget(self.cancel_button)
         status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.device_label)
+        status_row.addSpacing(18)
         status_row.addWidget(self.audio_label)
         root.addLayout(status_row)
 
@@ -333,6 +341,21 @@ class MainWindow(QMainWindow):
             self.audio_label.setText(
                 f"Audio: {info.get('device', '?')} · {info.get('host_api', '')} · "
                 f"{1000 * float(info.get('latency', 0)):.0f} ms")
+
+    def _on_device_probed(self, device, reason: str) -> None:
+        """Start-up check finished: say plainly what separation will run on."""
+        if device is not None and device.is_gpu:
+            self.device_label.setText(f"Separation: GPU · {device.name}")
+            self.device_label.setStyleSheet("")
+            self.device_label.setToolTip("New songs are separated on the graphics card.")
+            return
+        self.device_label.setText("Separation: CPU (slow)")
+        self.device_label.setStyleSheet("color: #ffb020;")
+        self.device_label.setToolTip(reason or "The CPU was selected in the settings.")
+        if reason:
+            logger.warning("GPU not usable: %s", reason)
+            self._show_banner(f"The graphics card is not being used, so separating a new song "
+                              f"takes minutes instead of seconds. Reason: {reason}")
 
     def _show_banner(self, text: str) -> None:
         self.banner.setText(text)
@@ -444,13 +467,22 @@ class MainWindow(QMainWindow):
         self._set_track_controls(True)
 
         sep = track.separation or {}
+        where = "GPU" if sep.get("device_kind") == "gpu" else "CPU"
+        made = f"{where} in {sep.get('separate_seconds', 0):.1f} s" if sep else ""
         if track.from_cache:
             text = f"Loaded from library in {track.load_seconds:.1f} s"
+            if made:
+                text += f" · stems were made on {made}"
         else:
-            where = "GPU" if sep.get("device_kind") == "gpu" else "CPU"
             text = (f"Separated on {where} ({sep.get('device_name', '?')}) in "
-                    f"{sep.get('separate_seconds', 0):.1f} s · {sep.get('realtime_factor', 0):.1f}× realtime")
+                    f"{sep.get('separate_seconds', 0):.1f} s · {sep.get('realtime_factor', 0):.1f}× realtime"
+                    f" · ready in {track.load_seconds:.1f} s")
         self.status_label.setText(text)
+        details = [f"{stage}: {seconds:.1f} s" for stage, seconds in (track.timings or {}).items()]
+        if sep.get("fallback_reason"):
+            details.append(f"GPU not used: {sep['fallback_reason']}")
+        self.status_label.setToolTip("Time per step when this song was first processed\n" + "\n".join(details)
+                                     if details else "")
         reason = sep.get("fallback_reason")
         if reason and not track.from_cache:
             self._show_banner(f"GPU was not used for this song, it ran on the CPU instead. Reason: {reason}")
@@ -657,6 +689,8 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(5000)
+        if self._probe.isRunning():
+            self._probe.wait(5000)
         if self._export_worker is not None and self._export_worker.isRunning():
             self._export_worker.wait(10000)
         self.engine.stop()

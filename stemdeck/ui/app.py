@@ -29,6 +29,19 @@ def main(files: list[str] | None = None) -> int:
     _setup_logging()
     log = logging.getLogger("stemdeck")
 
+    # Load PyTorch before the window toolkit. On Windows the two ship some of
+    # the same system libraries, and loading Qt first is a known way to make
+    # PyTorch's GPU libraries fail to initialise.
+    try:
+        import time
+
+        t0 = time.perf_counter()
+        import torch
+
+        log.info("PyTorch %s loaded in %.1fs", torch.__version__, time.perf_counter() - t0)
+    except Exception:
+        log.error("PyTorch could not be loaded:\n%s", traceback.format_exc())
+
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication, QMessageBox
 

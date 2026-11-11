@@ -67,6 +67,7 @@ class Track:
     separation: dict = field(default_factory=dict)   # stats of the run that made the stems
     from_cache: bool = False
     load_seconds: float = 0.0
+    timings: dict = field(default_factory=dict)      # seconds per stage when the song was first processed
 
     @property
     def n_frames(self) -> int:
@@ -125,7 +126,8 @@ def _save_analysis(folder: Path, analysis: AnalysisResult) -> None:
 
 
 def save_entry(track_id: str, model: str, source: Path, stems: dict[str, np.ndarray],
-               peaks: dict[str, Peaks], analysis: AnalysisResult, separation: dict) -> None:
+               peaks: dict[str, Peaks], analysis: AnalysisResult, separation: dict,
+               timings: dict | None = None) -> None:
     final = entry_dir(track_id, model)
     tmp = final.parent / f".tmp-{model}-{uuid.uuid4().hex[:8]}"
     try:
@@ -146,6 +148,7 @@ def save_entry(track_id: str, model: str, source: Path, stems: dict[str, np.ndar
             "sample_rate": SAMPLE_RATE,
             "stem_scale": scale,
             "separation": separation,
+            "timings": timings or {},
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }, indent=2), encoding="utf-8")
         if final.exists():
@@ -195,6 +198,7 @@ def load_entry(track_id: str, model: str, source_path: str = "",
         source_path=source_path or meta.get("source_path", ""), model=model,
         stems=stems, peaks=peaks, analysis=analysis,
         separation=meta.get("separation", {}), from_cache=True,
+        timings=meta.get("timings", {}),
     )
 
 
@@ -220,19 +224,31 @@ def load_track(
         if progress is not None:
             progress(stage, fraction, message)
 
+    timings: dict[str, float] = {}
+    mark = started
+
+    def lap(stage: str) -> None:
+        nonlocal mark
+        now = time.perf_counter()
+        timings[stage] = round(now - mark, 2)
+        mark = now
+
     report("hash", 0.0, "Identifying file")
     track_id = file_hash(path)
+    lap("identify")
 
     if not force and is_cached(track_id, model):
         try:
             track = load_entry(track_id, model, str(path), progress)
             track.load_seconds = time.perf_counter() - started
+            logger.info("Opened '%s' from the library in %.2fs", path.name, track.load_seconds)
             return track
         except Exception as exc:  # damaged entry: rebuild it rather than fail
             logger.warning("Cache entry for %s is unusable (%s); rebuilding", path.name, exc)
 
     report("decode", 0.0, "Reading audio")
     audio = load_audio(path)
+    lap("decode")
 
     from .separation import SeparationCancelled, separate
 
@@ -246,23 +262,35 @@ def load_track(
         )
     except SeparationCancelled as exc:
         raise LoadCancelled() from exc
+    lap("separate")          # includes GPU check, model load and, on fallback, the failed GPU attempt
 
     report("analyze", 0.0, "Detecting BPM, key and beats")
     # Analysis runs on the CPU: it takes a few seconds per song there, and it
     # keeps the GPU code path limited to the one thing that needs it.
     analysis = analyze(stems, device="cpu")
+    lap("analyze")
 
     report("save", 0.0, "Saving to library")
     peaks = {name: compute_peaks(stems[name]) for name in STEMS}
+    lap("waveforms")
     try:
-        save_entry(track_id, model, path, stems, peaks, analysis, stats.to_dict())
+        save_entry(track_id, model, path, stems, peaks, analysis, stats.to_dict(), timings)
     except OSError as exc:  # disk full etc.: the song still plays, just is not cached
         logger.warning("Could not cache %s: %s", path.name, exc)
+    lap("save")
 
+    total = time.perf_counter() - started
+    logger.info(
+        "Processed '%s' (%.0fs of audio) in %.1fs on %s [%s, %s, batch %s]: %s%s",
+        path.name, stats.audio_seconds, total,
+        "GPU" if stats.device_kind == "gpu" else "CPU", stats.device_name, stats.model,
+        stats.batch_size, ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()),
+        f" | GPU NOT USED: {stats.fallback_reason}" if stats.fallback_reason else "",
+    )
     return Track(
         track_id=track_id, title=path.stem, source_path=str(path), model=model,
         stems=stems, peaks=peaks, analysis=analysis, separation=stats.to_dict(),
-        from_cache=False, load_seconds=time.perf_counter() - started,
+        from_cache=False, load_seconds=total, timings=timings,
     )
 
 

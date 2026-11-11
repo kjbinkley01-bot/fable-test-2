@@ -100,7 +100,7 @@ def separate(
             fallback_reason = f"GPU run failed ({type(exc).__name__}: {exc})"
             if require_gpu:
                 raise GpuRequiredError(fallback_reason) from exc
-            logger.warning("%s - retrying on CPU", fallback_reason)
+            logger.warning("%s - retrying on CPU", fallback_reason, exc_info=True)
             with _cache_lock:
                 for key in [k for k in _cache if k[0] == chosen.torch_device]:
                     _cache.pop(key).unload()
