@@ -114,3 +114,31 @@ def test_library_roundtrip_and_cache_hit(tmp_path, monkeypatch):
     (lib.entry_dir(first.track_id, "htdemucs") / "stems" / "bass.flac").write_bytes(b"garbage")
     fifth = lib.load_track(song, model="htdemucs")
     assert not fifth.from_cache and calls["separate"] == 2
+
+
+def test_non_audio_files_get_a_clear_message(tmp_path):
+    """A failed download saved as .mp3 must be explained, not blamed on a missing decoder."""
+    import pytest
+
+    from stemdeck.audio_io import AudioLoadError, load_audio
+
+    fake = tmp_path / "Some Song.mp3"
+    fake.write_bytes(b"Not Found")
+    with pytest.raises(AudioLoadError, match="not audio.*9 bytes of text.*Not Found.*download"):
+        load_audio(fake)
+    html = tmp_path / "page.mp3"
+    html.write_bytes(b"<!DOCTYPE html><html><head><title>403 Forbidden</title></head>" * 40)
+    with pytest.raises(AudioLoadError, match="not audio.*bytes of text"):
+        load_audio(html)
+    empty = tmp_path / "empty.flac"
+    empty.write_bytes(b"")
+    with pytest.raises(AudioLoadError, match="empty"):
+        load_audio(empty)
+    with pytest.raises(AudioLoadError, match="File not found"):
+        load_audio(tmp_path / "missing.wav")
+    # real audio in every supported container still loads
+    tone = (0.1 * np.sin(np.arange(SAMPLE_RATE) * 0.05)).astype(np.float32)
+    for name, fmt, subtype in (("a.wav", "WAV", "PCM_16"), ("a.flac", "FLAC", "PCM_16"),
+                               ("a.ogg", "OGG", "VORBIS"), ("a.mp3", "MP3", "MPEG_LAYER_III")):
+        sf.write(tmp_path / name, tone, SAMPLE_RATE, format=fmt, subtype=subtype)
+        assert load_audio(tmp_path / name).shape[1] == 2
